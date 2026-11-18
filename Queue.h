@@ -63,21 +63,24 @@ public:
         return cnt; 
     }
 
-    const T& front() const {
+    // added for the live offer board. Looks at / remove entries without losing the FIFO order
+    const T& front() const {                       // oldest entry, not removed
         if (cnt == 0) { 
             cerr << "Queue is empty\n"; 
             exit(1); 
         }
         return data[head];
     }
-    const T& at(int i) const {
+
+    const T& at(int i) const {                     // i-th entry from the front (0 = oldest), for drawing the whole queue
         if (i < 0 || i >= cnt) { 
             cerr << "Queue index out of range\n"; 
             exit(1); 
         }
         return data[(head + i) % cap];
     }
-    void removeAt(int i) {
+
+    void removeAt(int i) {                         // remove the i-th entry (a customer picks from the middle). The rest keep their order
         if (i < 0 || i >= cnt) 
             return;
         for (int k = i; k < cnt - 1; k++) 
