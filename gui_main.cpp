@@ -523,6 +523,454 @@ int main(int argc, char **argv)
         if ((IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) && speed > 1)
             speed /= 2;
 
-        return 0;
+        // ----- input -----
+        Vector2 wmouse = GetScreenToWorld2D(mouse, cam);
+        if (tools.open)
+        {
+            tools.update(gr, mouse, clicked);
+            if (inMap && clicked)
+            {
+                int hit = nodeUnder(gr, wmouse);
+                if (hit >= 0)
+                    tools.pickNode(gr, hit);
+            }
+        }
+        else if (g.phase == CHOOSE_ROLE)
+        {
+            if (IsKeyPressed(KEY_U) || (clicked && CheckCollisionPointRec(mouse, R(MAP_W / 2 - 330, 330 + startShift(), 200, 90))))
+                g.chooseUser();
+            if (IsKeyPressed(KEY_R) || (clicked && CheckCollisionPointRec(mouse, R(MAP_W / 2 - 100, 330 + startShift(), 200, 90))))
+                g.chooseRider();
+            if (IsKeyPressed(KEY_D) || (clicked && CheckCollisionPointRec(mouse, R(MAP_W / 2 + 130, 330 + startShift(), 200, 90))))
+                g.chooseAdmin();
+        }
+        else
+        {
+            if (inMap && clicked)
+            {
+                int hit = nodeUnder(gr, wmouse), ra, rb;
+                if (hit >= 0)
+                    g.click(hit);
+                else if (g.role == ADMIN_ROLE && roadUnder(gr, wmouse, 10 / cam.zoom, ra, rb))
+                    g.toggleRoad(ra, rb); // close / reopen a road
+            }
+            if (IsKeyPressed(KEY_BACKSPACE) && (g.phase == U_DEST || g.phase == U_OFFER || g.phase == U_BIDDING || g.phase == R_BID))
+                g.reset();
+            if (g.phase == U_OFFER)
+            {
+                if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP))
+                    g.offer += 50;
+                if ((IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN)) && g.offer > 50)
+                    g.offer -= 50;
+                if (IsKeyPressed(KEY_ENTER))
+                    g.request();
+            }
+            if (g.phase == U_BIDDING)
+            {
+                for (int i = 0; i < g.sim.offers.size() && i < offerRowsMax(); i++)
+                    if (IsKeyPressed(KEY_ONE + i))
+                    {
+                        g.accept(i);
+                        break;
+                    }
+                if (g.phase == U_BIDDING && clicked)
+                    for (int i = 0; i < g.sim.offers.size() && i < offerRowsMax(); i++)
+                        if (CheckCollisionPointRec(mouse, R(MAP_W + 12, offerRowsTop() + i * OFFER_ROW_H, 296, 40)))
+                        {
+                            g.accept(i);
+                            break;
+                        }
+            }
+            if (g.phase == R_BROWSE && clicked)
+                for (int i = 0; i < g.sim.open.size() && i < waitRowsMax(); i++)
+                    if (CheckCollisionPointRec(mouse, R(MAP_W + 12, waitRowsTop() + i * WAIT_ROW_H, 296, 60)))
+                    {
+                        g.selectRequest(i);
+                        break;
+                    }
+            if (g.phase == R_BID)
+            {
+                if (!g.stillOpen(g.selReq))
+                {
+                    g.msg = "That customer is gone.";
+                    g.selReq = 0;
+                    g.phase = R_BROWSE;
+                }
+                else
+                {
+                    if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP))
+                        g.bidPrice += 10;
+                    if ((IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN)) && g.bidPrice > 10)
+                        g.bidPrice -= 10;
+                    if (IsKeyPressed(KEY_ENTER))
+                        g.placeBid();
+                }
+            }
+            if (g.phase == U_RIDING && g.myRide->phase == 2)
+                g.phase = U_DONE;
+            if (g.phase == R_DRIVING && g.myRide->phase == 2)
+            {
+                g.phase = R_DONE;
+                g.earned += g.myRide->fare;
+                g.rides++;
+            }
+            if ((g.phase == U_DONE || g.phase == R_DONE) && IsKeyPressed(KEY_ENTER))
+                g.reset();
+        }
+
+        // ----- advance the simulation (frozen while a driver decides, in tools, or paused; NOT while you pick a rider) -----
+        bool frozen = paused || tools.open || g.phase == CHOOSE_ROLE || g.phase == R_BID;
+        if (!frozen)
+        {
+            acc += dt * speed;
+            while (acc >= TICK)
+            {
+                acc -= TICK;
+                g.sim.tick();
+                g.drain();
+            }
+        }
+        if (g.phase == U_BIDDING && !g.sim.bidding())
+        {
+            // every offer expired: back to the offer screen
+            g.msg = "All riders lost interest. Raise your offer (UP) and try again.";
+            g.phase = U_OFFER;
+        }
+        float t = acc / TICK; // how far through the current tick (for smooth driving)
+
+        // ----- car positions: slide along the road the rider is on; a long road takes several ticks -----
+        Vector2 carP[64];
+        for (int i = 0; i < g.sim.riders.size() && i < 64; i++)
+        {
+            Rider *r = g.sim.riders[i];
+            Vector2 a = V(gr.x(r->prevNode), gr.y(r->prevNode)), b = V(gr.x(r->node), gr.y(r->node));
+            float frac = 1;
+            if (r->prevNode != r->node)
+            {
+                frac = ((g.sim.clock - r->moveStart) + t) / (float)r->moveTicks;
+                if (frac > 1)
+                    frac = 1;
+                if (frac < 0)
+                    frac = 0;
+                heading[i] = atan2f(b.y - a.y, b.x - a.x) * RAD2DEG;
+            }
+            carP[i] = V(a.x + (b.x - a.x) * frac, a.y + (b.y - a.y) * frac);
+        }
+        Rider *myRiderPtr = g.role == RIDER_ROLE ? g.meRider : (g.myRide ? g.myRide->rider : 0);
+        int myIdx = -1;
+        for (int i = 0; i < g.sim.riders.size(); i++)
+            if (g.sim.riders[i] == myRiderPtr)
+                myIdx = i;
+        if (follow && myIdx >= 0 && !tools.open)
+            cam.target = carP[myIdx];
+
+        // which customer / destination to highlight
+        int hiPickup = -1, hiDest = -1;
+        if (g.role == USER_ROLE)
+        {
+            if (g.pickup >= 0 && g.phase != U_DONE && (g.phase != U_RIDING || g.myRide->phase == 0))
+                hiPickup = g.pickup;
+            if (g.dest >= 0 && g.phase != U_DONE)
+                hiDest = g.dest;
+        }
+        else if (g.role == RIDER_ROLE)
+        {
+            if (g.phase == R_BID && g.selReq)
+            {
+                hiPickup = g.selReq->pickup;
+                hiDest = g.selReq->dest;
+            }
+            else if (g.phase == R_DRIVING && g.myRide)
+            {
+                if (g.myRide->phase == 0)
+                    hiPickup = g.myRide->user->pickup;
+                hiDest = g.myRide->user->dest;
+            }
+        }
+
+        // =============== DRAW ===============
+        BeginDrawing();
+        ClearBackground(C(236, 232, 224));
+        BeginScissorMode(0, 0, MAP_W, WIN_H);
+        BeginMode2D(cam);
+        if (hasMap)
+            DrawTextureEx(mapTex, V(0, 0), 0, mapScale, WHITE);
+        for (int pass = 0; pass < 2; pass++) // roads: outline first, then fill
+            for (int i = 0; i < gr.size(); i++)
+                for (int k = 0; k < gr.degree(i); k++)
+                {
+                    int j = gr.edge(i, k).to;
+                    if (j < i)
+                        continue;
+                    bool closed = gr.edge(i, k).blocked;
+                    Vector2 a = V(gr.x(i), gr.y(i)), b = V(gr.x(j), gr.y(j));
+                    if (pass == 0)
+                        DrawLineEx(a, b, 13, closed ? C(170, 60, 60) : C(176, 180, 188));
+                    else
+                        DrawLineEx(a, b, 9, closed ? C(238, 100, 100) : C(255, 255, 255));
+                }
+        for (int i = 0; i < gr.size(); i++) // closed-road signs
+            for (int k = 0; k < gr.degree(i); k++)
+                if (gr.edge(i, k).to > i && gr.edge(i, k).blocked)
+                {
+                    int j = gr.edge(i, k).to;
+                    Vector2 m = V((gr.x(i) + gr.x(j)) / 2, (gr.y(i) + gr.y(j)) / 2);
+                    DrawCircleV(m, 12, C(210, 40, 40));
+                    DrawRectangle((int)m.x - 8, (int)m.y - 2, 16, 4, WHITE);
+                }
+        for (int i = 0; i < gr.size(); i++)
+        {
+            // areas
+            DrawCircleV(V(gr.x(i), gr.y(i)), 6, C(120, 126, 138));
+            drawLabel(gr.name(i).c_str(), (int)gr.x(i) + 10, (int)gr.y(i) + 2, 14, C(50, 54, 64));
+        }
+        if (tools.open)
+            tools.drawMap(gr);
+        if (g.role == ADMIN_ROLE && !tools.open) // dispatcher: every ride's route and destination
+            for (int i = 0; i < g.sim.active.size(); i++)
+            {
+                Ride *ride = g.sim.active[i];
+                drawPath(gr, ride->path, 5, Fade(C(40, 105, 240), 0.55f));
+                drawPin(V(gr.x(ride->user->dest), gr.y(ride->user->dest)), 0.6f);
+            }
+
+        if (g.myRide && g.myRide->phase < 2 && myIdx >= 0 && !tools.open)
+        {
+            // the route, like Google Maps
+            Ride *ride = g.myRide;
+            bool toPickup = ride->phase == 0;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                Vector2 a = carP[myIdx];
+                for (int i = 0; i < ride->path.size(); i++)
+                {
+                    int n = ride->path[i];
+                    Vector2 b = V(gr.x(n), gr.y(n));
+                    bool jam = i > 0 && gr.isBlocked(ride->path[i - 1], n);
+                    Color col = jam ? C(255, 150, 0) : (toPickup ? C(130, 160, 215) : C(40, 105, 240));
+                    if (pass == 0)
+                        DrawLineEx(a, b, 12, WHITE);
+                    else
+                        DrawLineEx(a, b, 8, col);
+                    a = b;
+                }
+            }
+        }
+
+        if (hiDest >= 0)
+            drawPin(V(gr.x(hiDest), gr.y(hiDest)), 1.0f);                 // destination pin
+        bool seeCustomers = g.role == RIDER_ROLE || g.role == ADMIN_ROLE; // a user never sees other customers
+        for (int i = 0; seeCustomers && i < g.sim.open.size(); i++)
+        {
+            // customers still waiting for a driver (blue blips)
+            User *u = g.sim.open[i];
+            if (u->pickup == hiPickup)
+                continue;
+            drawPerson(V(gr.x(u->pickup) + (i % 3 - 1) * 12.0f, gr.y(u->pickup)), C(80, 110, 190), (float)now + i * 0.3f);
+        }
+        for (int i = 0; i < g.sim.active.size(); i++)
+        {
+            Ride *ride = g.sim.active[i];
+            if (g.role == ADMIN_ROLE && ride->phase == 0) // only the dispatcher sees customers who already have a driver
+                drawPerson(V(gr.x(ride->user->pickup), gr.y(ride->user->pickup)), C(230, 150, 30), (float)now + i);
+        }
+        if (hiPickup >= 0)
+            drawPerson(V(gr.x(hiPickup), gr.y(hiPickup)), C(24, 160, 88), (float)now); // YOUR customer (green)
+
+        for (int i = 0; i < g.sim.riders.size() && i < 64; i++)
+        {
+            // other cars (grey = free, blue = busy)
+            if (i == myIdx || g.role == RIDER_ROLE) // a rider sees no other riders
+                continue;
+            drawCar(carP[i], heading[i], g.sim.riders[i]->state == IDLE ? C(110, 118, 132) : C(70, 120, 200), 0.85f);
+            if (g.role == ADMIN_ROLE)
+            {
+                // dispatcher: name tag on every car
+                const string &full = g.sim.riders[i]->name;
+                string nm = full.substr(0, full.find(' '));
+                drawLabel(nm.c_str(), (int)carP[i].x - measureText(nm.c_str(), 13) / 2, (int)carP[i].y - 30 - (i % 2) * 14, 13, C(30, 34, 46)); // stagger tags so cars on one area stay readable
+            }
+        }
+        if (myIdx >= 0)
+            drawCar(carP[myIdx], heading[myIdx], C(222, 38, 38), 1.2f); // YOUR red car
+        EndMode2D();
+        EndScissorMode();
+
+        if (g.phase == CHOOSE_ROLE)
+        {
+            // role selection screen
+            DrawRectangle(0, 0, MAP_W, WIN_H, Fade(WHITE, 0.6f));
+            int sy = startShift(); // keeps the start screen vertically centred in a taller window
+            if (hasLogo)
+                DrawTexture(logoBig, MAP_W / 2 - logoBig.width / 2, 145 + sy, WHITE);
+            else
+                drawText("CHALGORITHM", MAP_W / 2 - measureText("CHALGORITHM", 56) / 2, 200 + sy, 56, C(30, 34, 46));
+            drawText("Who are you today?", MAP_W / 2 - measureText("Who are you today?", 22) / 2, 275 + sy, 22, C(100, 104, 116));
+            Rectangle bu = R(MAP_W / 2 - 330, 330 + sy, 200, 90), br = R(MAP_W / 2 - 100, 330 + sy, 200, 90), bd = R(MAP_W / 2 + 130, 330 + sy, 200, 90);
+            DrawRectangleRounded(bu, 0.2f, 8, CheckCollisionPointRec(mouse, bu) ? C(60, 130, 240) : C(40, 105, 220));
+            DrawRectangleRounded(br, 0.2f, 8, CheckCollisionPointRec(mouse, br) ? C(240, 90, 90) : C(214, 50, 50));
+            DrawRectangleRounded(bd, 0.2f, 8, CheckCollisionPointRec(mouse, bd) ? C(70, 80, 100) : C(45, 52, 68));
+            drawText("USER (U)", (int)bu.x + 26, (int)bu.y + 16, 24, WHITE);
+            drawText("I need a ride", (int)bu.x + 26, (int)bu.y + 52, 15, WHITE);
+            drawText("RIDER (R)", (int)br.x + 26, (int)br.y + 16, 24, WHITE);
+            drawText("I'm the driver", (int)br.x + 26, (int)br.y + 52, 15, WHITE);
+            drawText("DISPATCHER (D)", (int)bd.x + 14, (int)bd.y + 16, 20, WHITE);
+            drawText("I watch everything", (int)bd.x + 14, (int)bd.y + 52, 15, WHITE);
+            {
+                // how the road distances were obtained
+                DynamicArray<string> nl = wrap(g.sim.graph.loadNote(), 14, 640);
+                int w = 0;
+                for (int i = 0; i < nl.size(); i++)
+                    if (measureText(nl[i].c_str(), 14) > w)
+                        w = measureText(nl[i].c_str(), 14);
+                DrawRectangleRounded(R((float)(MAP_W / 2 - w / 2 - 14), (float)(446 + sy), (float)(w + 28), (float)(nl.size() * 18 + 12)), 0.4f, 6, Fade(WHITE, 0.92f));
+                for (int i = 0; i < nl.size(); i++)
+                    drawText(nl[i].c_str(), MAP_W / 2 - measureText(nl[i].c_str(), 14) / 2, 452 + sy + i * 18, 14, C(70, 74, 84));
+            }
+        }
+        tools.drawCharts();
+
+        // =============== PANEL ===============
+        // Text sizes go through pf() (a little larger than before) and every y position comes from the constants in
+        // gui_draw.h, so rows never overlap and the mouse hit-tests above use exactly the same geometry.
+        int px = MAP_W + 16;
+        DrawRectangle(MAP_W, 0, WIN_W - MAP_W, WIN_H, C(250, 250, 252));
+        DrawLine(MAP_W, 0, MAP_W, WIN_H, C(205, 208, 215));
+        if (hasLogo)
+            DrawTexture(logoSmall, px, 6, WHITE);
+        else
+            drawText("CHALGORITHM", px, 10, pf(26), C(30, 34, 46));
+        drawText(TextFormat("t=%d   speed x%d%s", g.sim.clock, speed, paused ? "   PAUSED" : (frozen ? "   (time stopped)" : "")), px, 42, pf(14), C(100, 104, 116));
+        int nClosed = 0, ca = -1, cb = -1; // closed roads (random or manual): first one by name + a count
+        for (int i = 0; i < gr.size(); i++)
+            for (int k = 0; k < gr.degree(i); k++)
+                if (gr.edge(i, k).to > i && gr.edge(i, k).blocked)
+                {
+                    if (nClosed++ == 0)
+                    {
+                        ca = i;
+                        cb = gr.edge(i, k).to;
+                    }
+                }
+        if (nClosed == 0)
+            textMax2("All roads open", px, 64, pf(14), C(24, 140, 80));
+        else
+            textMax2(nClosed == 1 ? "CLOSED: " + gr.name(ca) + " - " + gr.name(cb)
+                                  : "CLOSED: " + gr.name(ca) + " - " + gr.name(cb) + " (+" + to_string(nClosed - 1) + " more)",
+                     px, 64, pf(14), C(200, 40, 40));
+
+        int y = PANEL_TOP;
+        Color dark = C(30, 34, 46), grey = C(100, 104, 116), blue = C(24, 100, 220);
+        if (tools.open)
+            tools.drawPanel(gr, px);
+        else
+        {
+            if (g.role == RIDER_ROLE && g.meRider && g.phase != R_START)
+            {
+                drawText(TextFormat("DRIVER  rating %.2f | %d %s", g.meRider->rating, g.rides, g.rides == 1 ? "ride" : "rides"), px, PANEL_TOP, pf(13), C(24, 140, 80));
+                drawText(TextFormat("Earned Rs %d", (int)g.earned), px, PANEL_TOP + 20, pf(13), C(24, 140, 80));
+                y = RIDER_TOP;
+            }
+            if (g.phase == D_WATCH)
+            {
+                int nr = g.sim.riders.size();
+                int idle = g.sim.idleRiders();
+
+                drawText("DISPATCHER - view only", px, PANEL_TOP, pf(15), C(24, 140, 80));
+                drawText(TextFormat("Riders %d (free %d, busy %d)", nr, idle, nr - idle), px, PANEL_TOP + 24, pf(13), dark);
+                drawText(TextFormat("Waiting customers %d | rides running %d", g.sim.open.size(), g.sim.active.size()), px, PANEL_TOP + 44, pf(13), dark);
+                drawText(TextFormat("Rides completed %d | closed roads %d", g.sim.history.size(), nClosed), px, PANEL_TOP + 64, pf(13), dark);
+
+                // Driver list dimensionsa
+                int driverTop = PANEL_TOP + 92;
+                int driverViewHeight = 176;
+                int driverRowHeight = 22;
+
+                int driverTotalHeight = nr * driverRowHeight;
+                int maxDriverScroll = max(0, driverTotalHeight - driverViewHeight);
+
+                // Scroll when the mouse is over the driver list
+                if (mouse.x >= MAP_W &&
+                    mouse.y >= driverTop &&
+                    mouse.y <= driverTop + driverViewHeight)
+                {
+
+                    driverScroll -= (int)(wheel * 40);
+                }
+
+                // Clamp scroll position
+                if (driverScroll < 0)
+                    driverScroll = 0;
+                if (driverScroll > maxDriverScroll)
+                    driverScroll = maxDriverScroll;
+
+                // Draw driver rows inside a clipped viewport
+                BeginScissorMode(px, driverTop,
+                                 WIN_W - px - 16, driverViewHeight);
+
+                for (int i = 0; i < nr; i++)
+                {
+                    Rider *r = g.sim.riders[i];
+
+                    int rowY = driverTop + i * driverRowHeight - driverScroll;
+
+                    const char *status =
+                        r->state == IDLE ? "free" : (r->state == TO_PICKUP ? "to pickup" : "on trip");
+
+                    string firstName = r->name.substr(0, r->name.find(' '));
+
+                    drawText(fitText(firstName, pf(14), 72).c_str(), px, rowY, pf(14), dark);
+
+                    drawText(status, px + 78, rowY, pf(14),
+                             r->state == IDLE ? grey : blue);
+
+                    drawText(TextFormat("%.1f", r->rating),
+                             px + 152, rowY, pf(14), grey);
+
+                    drawText(fitText(gr.name(r->node), pf(14), 100).c_str(),
+                             px + 184, rowY, pf(14), grey);
+                }
+
+                EndScissorMode();
+
+                // Scrollbar
+                if (maxDriverScroll > 0)
+                {
+                    float barHeight =
+                        (float)driverViewHeight * driverViewHeight /
+                        driverTotalHeight;
+
+                    float barY = driverTop +
+                                 ((float)driverScroll / maxDriverScroll) * (driverViewHeight - barHeight);
+
+                    DrawRectangle(WIN_W - 12, driverTop, 3,
+                                  driverViewHeight, C(225, 228, 235));
+
+                    DrawRectangle(WIN_W - 12, (int)barY, 3,
+                                  (int)barHeight, C(120, 130, 150));
+                }
+
+                if (nr == 0)
+                {
+                    drawText("No drivers available.", px, driverTop, pf(11), grey);
+                }
+
+                text("Scroll to view drivers | Click a road to close/reopen it.", px, driverTop + driverViewHeight + 6, pf(12), grey);
+            }
+            else if (g.phase == U_PICKUP)
+                y = text("Click your PICKUP area on the map.", px, y, pf(18), dark);
+            else if (g.phase == U_DEST)
+                y = text("Pickup: " + gr.name(g.pickup) + ". Now click your DESTINATION.", px, y, pf(18), dark);
+            else if (g.phase == U_OFFER)
+            {
+                y = text(gr.name(g.pickup) + " -> " + gr.name(g.dest), px, y, pf(18), dark);
+                y = text(string(TextFormat("%.1f km | surge x%.2f | suggested Rs %d", g.sim.distance(g.pickup, g.dest), g.sim.surge(g.pickup), (int)g.suggested)), px, y, pf(14), grey);
+                y = text(string(TextFormat("Your offer: Rs %d   (UP / DOWN)", (int)g.offer)), px, y + 6, pf(18), blue);
+                y = text("Press ENTER to request a ride.", px, y + 6, pf(14), dark);
+            }
+        }
+        EndDrawing();
     }
+    CloseWindow();
+    return 0;
 }
