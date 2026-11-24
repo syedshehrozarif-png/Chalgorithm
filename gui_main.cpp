@@ -1,4 +1,4 @@
-// gui_main.cpp - live map. Uses Simulation.h UNCHANGED: the GUI only draws what the simulation does.
+// gui_main.cpp - live map. Uses Simulation.h: the GUI only draws what the simulation does.
 // Choose a role at the start (each role sees a different map):
 //   USER  : click pickup, click destination, ENTER, riders' offers arrive live - pick one before it expires (time keeps running).
 //   RIDER : click where your shift starts, click a waiting customer, set your bid, ENTER, then drive them.
@@ -968,9 +968,253 @@ int main(int argc, char **argv)
                 y = text(string(TextFormat("Your offer: Rs %d   (UP / DOWN)", (int)g.offer)), px, y + 6, pf(18), blue);
                 y = text("Press ENTER to request a ride.", px, y + 6, pf(14), dark);
             }
+			else if (g.phase == U_BIDDING)
+			{
+                int rowsTop = offerRowsTop(), rowsMax = offerRowsMax();
+                int nOff = g.sim.offers.size() < rowsMax ? g.sim.offers.size() : rowsMax;
+                text("Offers arrive live - click one (or press 1-9) before it expires:", px, PANEL_TOP, pf(14), dark);
+                for (int i = 0; i < nOff; i++)
+                {                          // oldest offer first: it is also the first to leave
+                    const Offer& o = g.sim.offers.at(i);
+                    Rider* r = g.sim.riders[o.bid.riderIdx];
+                    float left = (o.leaveTick - g.sim.clock) - t;         // ticks until this rider loses interest
+                    if (left < 0) 
+						left = 0;
+                    float frac = left / OFFER_LIFE;
+                    Color tc = frac > 0.5f ? C(30, 160, 90) : (frac > 0.25f ? C(240, 150, 40) : C(214, 50, 50));
+                    int ry = rowsTop + i * OFFER_ROW_H;
+                    Rectangle row = R(MAP_W + 12, ry, 296, 40);
+                    DrawRectangleRounded(row, 0.2f, 6, CheckCollisionPointRec(mouse, row) ? C(214, 228, 255) : C(238, 240, 246));
+                    drawText(TextFormat("%d. %s", i + 1, r->name.c_str()), px, ry + 4, pf(14), dark);
+                    string secs = string(TextFormat("%.0fs", left * TICK / speed));
+                    drawText(secs.c_str(), MAP_W + 12 + 296 - 8 - measureText(secs.c_str(), pf(14)), ry + 4, pf(14), tc);
+                    drawText(fitText(string(TextFormat("Rs %d  |  %.1f km away  |  rating %.1f", (int)o.bid.price, o.bid.pickupDist, r->rating)), pf(12), 282).c_str(), px, ry + 22, pf(12), grey);
+                    DrawRectangle(MAP_W + 12 + 6, ry + 37, (int)((296 - 12) * frac), 2, tc);   // countdown bar
+                }
+                y = rowsTop + nOff * OFFER_ROW_H + 2;
+                if (g.sim.offers.size() > nOff) 
+					y = text(string(TextFormat("+%d more offers waiting", g.sim.offers.size() - nOff)), px, y, pf(12), grey);
+                if (g.sim.offers.size() == 0) 
+					y = text("Waiting for riders to answer...", px, y, pf(13), grey);
+                else if (g.sim.incoming.size() > 0) 
+					y = text(string(TextFormat("%d more riders are still deciding...", g.sim.incoming.size())), px, y, pf(12), grey);
+                y = text("BACKSPACE = cancel request", px, y + 2, pf(12), grey);
+            }
+            else if (g.phase == U_RIDING && g.myRide)
+            {
+                y = text("Driver: " + g.myRide->rider->name, px, y, pf(18), dark);
+                y = text(g.myRide->phase == 0 ? "Your driver is coming to pick you up." : "On the way to your destination.", px, y, pf(14), blue);
+                y = text(string(TextFormat("Fare Rs %d | roads left: %d%s", (int)g.myRide->fare, g.myRide->path.size() - 1 + (g.myRide->rider->prevNode != g.myRide->rider->node ? 1 : 0),
+                    g.myRide->wait > 0 ? " | STUCK IN TRAFFIC" : "")), px, y + 4, pf(14), g.myRide->wait > 0 ? C(220, 120, 0) : grey);
+            }
+            else if (g.phase == U_DONE && g.myRide)
+            {
+                y = text("Ride complete!", px, y, pf(22), C(24, 140, 80));
+                y = text(string(TextFormat("Fare Rs %d | drove %.1f km (best %.1f km) | traffic delay %d", (int)g.myRide->fare,
+                    g.myRide->travelled, g.myRide->optimal, g.myRide->delay)), px, y + 4, pf(14), grey);
+                y = text("Press ENTER to book another ride.", px, y + 6, pf(14), dark);
+            }
+            else if (g.phase == R_START) 
+				y = text("Click the area where your shift starts.", px, y, pf(18), dark);
+            else if (g.phase == R_BROWSE)
+            {
+                int rowsTop = waitRowsTop(), rowsMax = waitRowsMax();
+                int nW = g.sim.open.size() < rowsMax ? g.sim.open.size() : rowsMax;
+                if (g.sim.open.size() == 0) 
+					y = text("No customers waiting yet. New ones appear every few seconds.", px, y, pf(14), grey);
+                else 
+					text("Customers waiting - click one (or its blip):", px, y, pf(14), dark);
+                for (int i = 0; i < nW; i++)
+                {
+                    User* u = g.sim.open[i];
+                    int ry = rowsTop + i * WAIT_ROW_H;
+                    Rectangle row = R(MAP_W + 12, ry, 296, 60);
+                    DrawRectangleRounded(row, 0.2f, 6, CheckCollisionPointRec(mouse, row) ? C(214, 228, 255) : C(238, 240, 246));
+                    drawText(fitText(string(TextFormat("%s   offers Rs %d", u->name.c_str(), (int)u->offer)), pf(14), 282).c_str(), px, ry + 5, pf(14), dark);
+                    textMax2(string(TextFormat("%s > %s | %.1f km away | trip %.1f km", gr.name(u->pickup).c_str(), gr.name(u->dest).c_str(),
+                    	g.sim.distance(g.meRider->node, u->pickup), g.sim.distance(u->pickup, u->dest))), px, ry + 25, pf(11), grey, 280);
+                }
+                if (g.sim.open.size() > 0)
+                {
+                    y = rowsTop + nW * WAIT_ROW_H + 2;
+                    if (g.sim.open.size() > nW) 
+						y = text(string(TextFormat("+%d more waiting - click their blip on the map", g.sim.open.size() - nW)), px, y, pf(12), grey);
+                }
+            }
+            else if (g.phase == R_BID && g.selReq)
+            {
+                y = text(g.selReq->name + ": " + gr.name(g.selReq->pickup) + " -> " + gr.name(g.selReq->dest), px, y, pf(16), dark);
+                y = text(string(TextFormat("Their offer: Rs %d | your cost at Rs %d/km: Rs %d", (int)g.selReq->offer, (int)g.meRider->perKm, (int)g.bidCost)), px, y + 2, pf(14), grey);
+                y = text(string(TextFormat("Your bid: Rs %d   (UP / DOWN)", (int)g.bidPrice)), px, y + 8, pf(18), blue);
+                y = text("ENTER = send bid | BACKSPACE = back. Bid too high and they refuse; too low and you lose money.", px, y + 6, pf(13), dark);
+            }
+            else if (g.phase == R_DRIVING && g.myRide)
+            {
+                y = text(g.myRide->phase == 0 ? "Driving to your customer." : "Customer on board - driving to the destination.", px, y, pf(16), blue);
+                y = text(string(TextFormat("Fare Rs %d | roads left: %d%s", (int)g.myRide->fare, g.myRide->path.size() - 1 + (g.meRider->prevNode != g.meRider->node ? 1 : 0),
+                    g.myRide->wait > 0 ? " | STUCK IN TRAFFIC" : "")), px, y + 4, pf(14), g.myRide->wait > 0 ? C(220, 120, 0) : grey);
+            }
+            else if (g.phase == R_DONE && g.myRide)
+            {
+                y = text("Customer dropped off!", px, y, pf(22), C(24, 140, 80));
+                y = text(string(TextFormat("You earned Rs %d | drove %.1f km (best %.1f km) | traffic delay %d", (int)g.myRide->fare,
+                    g.myRide->travelled, g.myRide->optimal, g.myRide->delay)), px, y + 4, pf(14), grey);
+                y = text("Press ENTER to look for the next customer.", px, y + 6, pf(14), dark);
+            }
+            if (g.msg.size()) 
+				text(g.msg, px, y + 6, pf(14), C(200, 40, 40));
         }
-        EndDrawing();
+
+        int logTop = g.role == ADMIN_ROLE ? LOG_TOP_ADMIN : LOG_TOP_USER;
+
+if (showBoard && g.role == ADMIN_ROLE)
+{
+    DynamicArray<LbEntry> top = g.sim.board.topK(5);
+    drawMedium("LEADERBOARD (AVL tree)", px, logTop - 26, pf(15), dark);
+    for (int i = 0; i < top.size(); i++)
+        drawText(TextFormat("#%d  %s   %.2f",
+                 i + 1, top[i].name.c_str(), top[i].rating),
+                 px, logTop + 4 + i * 26, pf(16), C(60, 64, 76));
+}
+else
+{
+    DrawLine(px, logTop - 32, WIN_W - 16, logTop - 32, C(225, 228, 235));
+    drawMedium(g.role == ADMIN_ROLE ? "ALL EVENTS" :
+               (g.role == RIDER_ROLE ? "YOUR SHIFT" : "YOUR TRIP"),
+               px, logTop - 26, pf(12), C(120, 124, 136));
+    drawText("newest first",
+             WIN_W - 16 - measureText("newest first", pf(11)),
+             logTop - 25, pf(11), C(150, 154, 166));
+
+    // Calculate total height of visible log entries
+    int totalHeight = 0;
+    for (int i = g.lines.size() - 1; i >= 0; i--)
+    {
+        const LogEntry& e = g.lines[i];
+        if (!g.seesLog(e)) 
+			continue;
+        DynamicArray<string> head = wrap(e.text, pf(13), 232);
+        DynamicArray<string> det = wrap(e.detail, pf(11), 240);
+        if (e.detail.empty()) 
+			det.clear();
+        totalHeight += head.size() * (pf(13) + 3) + det.size() * (pf(11) + 2) + 10;
     }
+
+    // Scrollable viewport dimensions
+    int viewHeight = WIN_H - logTop - 46;
+    int maxScroll = totalHeight - viewHeight;
+    if (maxScroll < 0) 
+		maxScroll = 0;
+
+    // Mouse wheel only scrolls when hovering over the log panel
+    if (mouse.x >= MAP_W && mouse.y >= logTop && mouse.y <= WIN_H - 46)
+    {
+	    logScroll -= (int)(wheel * 40);
+    }
+
+    // Keep scroll position within valid limits
+    if (logScroll < 0) 
+		logScroll = 0;
+    if (logScroll > maxScroll) 
+		logScroll = maxScroll;
+
+    // Clip drawing to the log panel
+    BeginScissorMode(px, logTop, WIN_W - px - 16, viewHeight);
+
+    int ey = logTop - logScroll;
+    bool newest = true;
+
+    for (int i = g.lines.size() - 1; i >= 0; i--)
+    {
+        const LogEntry& e = g.lines[i];
+        if (!g.seesLog(e)) 
+			continue;
+
+        DynamicArray<string> head = wrap(e.text, pf(13), 232);
+        DynamicArray<string> det = wrap(e.detail, pf(11), 240);
+
+        if (e.detail.empty()) 
+			det.clear();
+
+        int h = head.size() * (pf(13) + 3) + det.size() * (pf(11) + 2) + 10;
+        if (ey + h > logTop && ey < logTop + viewHeight)
+        {
+            Color kc = logColor(e.kind);
+            if (newest)
+                DrawRectangleRounded(
+                    R((float)(px - 6), (float)(ey - 3),
+                    (float)(WIN_W - px - 4), (float)(h - 2)),
+                    0.15f, 6, C(238, 242, 250));
+
+            DrawRectangle(px, ey, 3, h - 8, kc);
+            drawText(TextFormat("t%d", e.tick),
+                     px + 9, ey + 2, pf(11), C(150, 154, 166));
+            for (int k = 0; k < head.size(); k++)
+                drawMedium(head[k].c_str(),
+                           px + 46, ey + k * (pf(13) + 3), pf(13),
+                           newest ? dark : C(70, 74, 86));
+
+            for (int k = 0; k < det.size(); k++)
+                drawText(det[k].c_str(),
+                         px + 46,
+                         ey + head.size() * (pf(13) + 3) + k * (pf(11) + 2),
+                         pf(11), C(120, 124, 136));
+        }
+        ey += h;
+        newest = false;
+    }
+    EndScissorMode();
+
+    // Scroll position indicator
+    if (maxScroll > 0)
+    {
+        float barHeight = (float)viewHeight * viewHeight / totalHeight;
+        float barY = logTop +
+                     ((float)logScroll / maxScroll) *
+                     (viewHeight - barHeight);
+
+        DrawRectangle(WIN_W - 12, logTop, 3, viewHeight,
+                      C(225, 228, 235));
+
+        DrawRectangle(WIN_W - 12, (int)barY, 3,
+                      (int)barHeight, C(120, 130, 150));
+    }
+}
+        drawText(g.role == ADMIN_ROLE ? "P pause | +/- speed | TAB leaderboard | T tools" : "P pause | +/- speed | F follow | T tools", px, WIN_H - 34, 12, C(130, 134, 146));
+        drawText("wheel zoom | right-drag pan | BACKSPACE back", px, WIN_H - 18, 12, C(130, 134, 146));
+        EndDrawing();
+
+        if (demo)
+        {                                                              // screenshots for checking the look
+            static const double atNormal[] = {3.2, 6.0, 8.5, 11.0, 14.5}, atTools[] = {1.0, 2.0, 3.0, 4.0, 5.0};
+            const double* at = dm == "-tools" ? atTools : atNormal;
+            static bool roleShot = false, bidShot = false;
+            if (!roleShot && g.phase == CHOOSE_ROLE && now > 0.2)
+            {
+                TakeScreenshot("role.png"); roleShot = true;
+            }
+            
+            if (!bidShot && g.phase == R_BID)
+            {
+                TakeScreenshot("bid.png"); bidShot = true;
+            }
+
+            if (shots < 5 && now > at[shots])
+            {
+                TakeScreenshot(TextFormat("shot%d.png", shots + 1)); shots++;
+            }
+
+            if (shots >= 5) 
+				break;
+        }
+    }
+    if (hasMap) 
+		UnloadTexture(mapTex);
+    if (hasLogo)
+    {
+        UnloadTexture(logoBig); UnloadTexture(logoSmall);
+    }
+    unloadUiFonts();
     CloseWindow();
     return 0;
 }
