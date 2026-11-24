@@ -6,13 +6,10 @@
   writes: areas.csv              (where each area was found, so you can review it)
           weights.txt            (real road km for every road, in both directions)
 
-The game itself never uses the internet: it only reads weights.txt.   Python 3, standard library only.
-
-  python fetch_distances.py --review-only    find the areas, write areas.csv, stop (check it on a map!)
+  python fetch_distances.py --review-only    find the areas, write areas.csv, stop
   python fetch_distances.py                  get the distances and write weights.txt
 
 API key: put it in a file called ors_key.txt (one line), or set the ORS_API_KEY environment variable.
-Never share or submit ors_key.txt.  Free key: openrouteservice.org -> sign up -> Dashboard -> Request a token.
 """
 import csv, json, math, os, sys, time
 import urllib.request, urllib.error, urllib.parse
